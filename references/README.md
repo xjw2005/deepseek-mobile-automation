@@ -9,6 +9,14 @@ The integration has **two cooperating modules**:
 
 The Python runner is the orchestrator. When `--extract-sources` is enabled, it captures the answer share link on the phone, hands it to the JS extractor, and the JS extractor writes the sources to Feishu.
 
+## Changelog / 变更说明
+
+### 2026-06-24 — 飞书表 ID 外置
+
+- **Externalized Feishu table IDs**: new `--feishu-config` (alias `--writeback-config`) loads a JSON with `input.baseUrl`/`baseToken`/`tableId`/`viewId`, `writeback.answerTableId`, `writeback.sourceTableId`, and `collectAccount`; applied as defaults with **CLI overriding JSON**. New `--answer-table-id` flag. Template: `mobile-auto-deepseek/configs/feishu-deepseek-example.json`.
+- `write_feishu_result` / `planned_writeback` now read the answer/source table IDs from `writeback_context` and fall back to the `FEISHU_ANSWER_TABLE_ID` / `FEISHU_SOURCE_TABLE_ID` constants. Field names/column structure are unchanged — switching Feishu environments usually means editing only the table IDs in the JSON, no source edits.
+- (`--link-only` was already added in v2.0 and is unchanged here.)
+
 ## What This Skill Contains
 
 ```text
@@ -30,6 +38,8 @@ references/
       thinking_capture.py           # thinking-detail page capture
       time_utils.py                 # ISO timestamps and stamps
       ui_xml.py                     # uiautomator XML parsing
+    configs/                        # externalized Feishu table-ID config
+      feishu-deepseek-example.json  # --feishu-config template (only table IDs change per env)
   deepseek-source-extractor/        # JS extractor (module 1, standalone reference)
     run.js                          # main entry: extract + write to Feishu
     extract-sources.js              # CDP-based source URL extraction

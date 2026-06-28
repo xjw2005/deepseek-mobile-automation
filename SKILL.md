@@ -1,6 +1,6 @@
 ---
 name: deepseek-mobile-automation
-description: Drives DeepSeek Android via ADB to capture answers/share links, extracts real source URLs via a Node.js CDP script, and writes to Feishu. Invoke for DeepSeek mobile runs or share-page source extraction. NEW v2.0: --link-only mode skips mobile thinking capture, fetches all content from desktop share page API in ~3 sec.
+description: Drives DeepSeek Android via ADB to capture answers/share links, extracts real source URLs via a Node.js CDP script, and writes to Feishu. Invoke for DeepSeek mobile runs or share-page source extraction. NEW v2.1: --link-only mode skips mobile thinking capture, fetches all content from desktop share page API in ~3 sec. --feishu-config externalizes the Feishu answer/source table IDs into a JSON (switch environments without source edits).
 ---
 
 # DeepSeek Mobile Automation
@@ -91,6 +91,27 @@ python -m mobile_auto_deepseek.runner `
 
 With `--link-only`, the runner skips mobile-side thinking content capture. Instead, the JS extractor (via `--extract-sources`) fetches the answer, thinking, and sources from the desktop share page API in ~3 seconds per question. This is ideal for batch collection: 30 sec answer wait + 3 sec extraction ≈ 33 sec per question, vs. 2–5 min in normal mode.
 
+Externalized Feishu table config (switch environments by editing one JSON, not source):
+
+```powershell
+# JSON supplies the input base + answer/source writeback table IDs; CLI flags still override it.
+python -m mobile_auto_deepseek.runner --feishu-config configs\feishu-deepseek-example.json --base-start 1 --base-end 10 --dry-run
+
+python -m mobile_auto_deepseek.runner `
+  --feishu-config configs\feishu-deepseek-example.json `
+  --base-start 1 --base-end 100 --writeback --mark-collected `
+  --extract-sources --link-only --cdp-url http://127.0.0.1:9222 `
+  --lark-cli "C:\Users\Administrator\.workbuddy\bin\lark-cli.cmd" `
+  --adb "C:\Users\Administrator\AppData\Local\Android\Sdk\platform-tools\adb.exe" `
+  --serial 100.76.50.7:6666
+```
+
+- `--feishu-config` / `--writeback-config` — JSON file with `input.baseUrl` (or `baseToken`/`tableId`/`viewId`), `writeback.answerTableId`, `writeback.sourceTableId`, and `collectAccount`. Loaded at startup and applied as defaults; **CLI flags always win**. Template: `references/mobile-auto-deepseek/configs/feishu-deepseek-example.json`.
+- `--answer-table-id` — Feishu table_id for the answer writeback table (defaults to the built-in DeepSeek answer table).
+- `--source-table-id` — Feishu table_id for the source table (flows to the JS extractor).
+
+Only table IDs change between Feishu environments — field names and column structure stay fixed (`feishu_base.py` `ANSWER_WRITEBACK_FIELDS` / `SOURCE_WRITEBACK_FIELDS`).
+
 For parallel runs, pass a unique `--serial` and a unique `--output` per process.
 The runner refuses to guess when multiple adb devices are online, which prevents cross-device runs.
 
@@ -122,7 +143,7 @@ The JS extractor needs Chrome running with `--remote-debugging-port=9222` and th
 ## Required References
 
 - `references/README.md`: migration, environment setup, ADB checks, ADB Keyboard setup, Chrome CDP setup, task JSON contract, Feishu Base mode, output contract, troubleshooting, and the cooperation diagram between the two modules.
-- `references/mobile-auto-deepseek/`: runnable Python project snapshot containing `mobile_auto_deepseek/` (the package) and `deepseek-source-extractor/` (the integrated JS scripts).
+- `references/mobile-auto-deepseek/`: runnable Python project snapshot containing `mobile_auto_deepseek/` (the package), `deepseek-source-extractor/` (the integrated JS scripts), and `configs/feishu-deepseek-example.json` (externalized Feishu table-ID template).
 - `references/deepseek-source-extractor/`: standalone JS extractor reference (top-level) for agents that only need web-side source extraction.
 - `references/tasks/`: task JSON examples for the Python runner.
 - `references/docs/`: design notes.
@@ -134,7 +155,7 @@ The JS extractor needs Chrome running with `--remote-debugging-port=9222` and th
 - `runner.py` — CLI entry point. Parse args, build task, run sessions, write results, invoke JS extractor bridge.
 - `app.py` — UI automation: ensure_app, create_new_chat, enter_thinking_mode, send_question, wait_for_answer, capture_thinking_content, extract_answer_share_link.
 - `source_extractor_bridge.py` — Bridge to the JS extractor. Validates share URL, locates run.js, invokes with subprocess, retries with exponential backoff.
-- `feishu_base.py` — Feishu Base read/write via lark-cli. Builds tasks from Feishu rows, writes answer rows back.
+- `feishu_base.py` — Feishu Base read/write via lark-cli. Builds tasks from Feishu rows, writes answer rows back. Writeback table IDs are read from `writeback_context` (supplied by `--feishu-config`/CLI) and fall back to the `FEISHU_ANSWER_TABLE_ID` / `FEISHU_SOURCE_TABLE_ID` constants; column structure is fixed.
 - `adb_client.py` — ADB wrapper (tap, keyevent, text broadcast, dump_xml, screenshot, ime).
 - `constants.py` — DeepSeek package name (`com.deepseek.chat`), ADB Keyboard IME, UI text constants.
 - `ocr.py` — Windows Media.Ocr wrapper for screenshot-based OCR fallback.

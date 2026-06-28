@@ -44,10 +44,11 @@ def clean_thinking_for_writeback(value) -> str:
 
 
 def clean_answer_for_writeback(value) -> str:
-    """Trim answer preludes and normalize the final answer text."""
+    """Trim answer preludes, reference markers, and normalize the final answer text."""
     text = clean_text(value)
     if not text:
         return ""
+    text = re.sub(r"\[reference:\d+\]", "", text)
     if text.startswith(ANSWER_PRELUDE_PREFIXES):
         starts = [index for marker in ANSWER_START_MARKERS if (index := text.find(marker, 10)) > 0]
         if starts:
@@ -333,7 +334,9 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
     base = writeback_context["base"]
     lark_cli = writeback_context.get("larkCli", "lark-cli")
     dry_run = bool(writeback_context.get("dryRun"))
-    answer_result = create_feishu_records(base, FEISHU_ANSWER_TABLE_ID, ANSWER_WRITEBACK_FIELDS, rows["answerRows"], lark_cli, dry_run)
+    answer_table_id = writeback_context.get("answerTableId") or FEISHU_ANSWER_TABLE_ID
+    source_table_id = writeback_context.get("sourceTableId") or FEISHU_SOURCE_TABLE_ID
+    answer_result = create_feishu_records(base, answer_table_id, ANSWER_WRITEBACK_FIELDS, rows["answerRows"], lark_cli, dry_run)
     # 来源记录由 deepseek-source-extractor JS 脚本直接写入飞书来源表，
     # Python 端不再重复写源；这里仅记录 JS 提取结果以便审计与追踪。
     js_extraction = result.get("sourceExtraction") or {}
@@ -343,7 +346,7 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
         source_result = {
             "skipped": False,
             "reason": "written_by_js_extractor",
-            "tableId": FEISHU_SOURCE_TABLE_ID,
+            "tableId": source_table_id,
             "count": js_source_count,
             "jsStatus": js_extraction.get("status"),
             "jsWriteOk": js_write_ok,
@@ -353,7 +356,7 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
         source_result = {
             "skipped": True,
             "reason": js_extraction.get("reason", "js_extractor_skipped"),
-            "tableId": FEISHU_SOURCE_TABLE_ID,
+            "tableId": source_table_id,
             "count": 0,
             "jsStatus": js_extraction.get("status"),
         }
@@ -361,7 +364,7 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
         source_result = {
             "skipped": True,
             "reason": "js_extractor_failed",
-            "tableId": FEISHU_SOURCE_TABLE_ID,
+            "tableId": source_table_id,
             "count": 0,
             "jsStatus": js_extraction.get("status"),
             "jsError": js_extraction.get("error"),
@@ -374,8 +377,8 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
         source_update_result = {"skipped": True, "reason": "no-source-record-id-or-answer-row" if writeback_context.get("markCollected") else "mark-collected-disabled"}
     return {
         "finishedAt": now_iso(),
-        "answerTableId": FEISHU_ANSWER_TABLE_ID,
-        "sourceTableId": FEISHU_SOURCE_TABLE_ID,
+        "answerTableId": answer_table_id,
+        "sourceTableId": source_table_id,
         "inputTableId": base["tableId"],
         "sourceRecordId": source_record_id,
         "markCollected": bool(writeback_context.get("markCollected")),
@@ -387,7 +390,7 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
     }
 
 
-def planned_writeback(task: dict, enabled: bool, mark_collected: bool = False) -> dict:
+def planned_writeback(task: dict, enabled: bool, mark_collected: bool = False, answer_table_id: str = "", source_table_id: str = "") -> dict:
     """Describe the writeback work that would happen for this task."""
     record_ids = [
         session.get("meta", {}).get("feishuRecordId")
@@ -396,11 +399,13 @@ def planned_writeback(task: dict, enabled: bool, mark_collected: bool = False) -
     ]
     extractor_cfg = task.get("options", {}).get("sourceExtractor") or {}
     extractor_enabled = bool(extractor_cfg.get("enabled"))
+    answer_table = (answer_table_id or "").strip() or FEISHU_ANSWER_TABLE_ID
+    source_table = (source_table_id or "").strip() or FEISHU_SOURCE_TABLE_ID
     return {
         "enabled": bool(enabled),
         "action": "create DeepSeek answer records; source records written by JS extractor" if extractor_enabled else "create DeepSeek answer records only; source writeback is disabled",
-        "answerTableId": FEISHU_ANSWER_TABLE_ID,
-        "sourceTableId": FEISHU_SOURCE_TABLE_ID if extractor_enabled else None,
+        "answerTableId": answer_table,
+        "sourceTableId": source_table if extractor_enabled else None,
         "markCollected": bool(mark_collected),
         "markCollectedField": "是否本次采集",
         "markCollectedValue": "否",

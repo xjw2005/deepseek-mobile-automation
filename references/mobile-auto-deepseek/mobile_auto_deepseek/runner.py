@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-token")
     parser.add_argument("--table-id")
     parser.add_argument("--view-id")
+    parser.add_argument("--feishu-config", "--writeback-config", dest="feishu_config", help="JSON file describing Feishu input base and answer/source writeback table IDs. CLI flags override JSON values.")
     parser.add_argument("--base-start", type=int, help="1-based start row in Feishu Base, inclusive.")
     parser.add_argument("--base-end", type=int, help="1-based end row in Feishu Base, inclusive.")
     parser.add_argument("--base-limit", type=int, default=50)
@@ -86,8 +87,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extractor-timeout", type=int, default=120, help="Per-attempt timeout (seconds) for the JS extractor.")
     parser.add_argument("--extractor-retries", type=int, default=2, help="Max retries for the JS extractor on failure.")
     parser.add_argument("--source-base-token", default="", help="Feishu base_token for the source table. Defaults to the input base_token.")
-    parser.add_argument("--source-table-id", default="", help="Feishu table_id for the source table. Defaults to the built-in Qianwen source table.")
+    parser.add_argument("--source-table-id", default="", help="Feishu table_id for the source table. Defaults to the built-in DeepSeek source table.")
+    parser.add_argument("--answer-table-id", default="", help="Feishu table_id for the answer writeback table. Defaults to the built-in DeepSeek answer table.")
     return parser.parse_args()
+
+
+def load_feishu_config(path: str | None) -> dict:
+    """Load optional Feishu input/writeback table configuration from JSON."""
+    if not path:
+        return {}
+    config_path = Path(path)
+    if not config_path.is_file():
+        raise ValueError(f"Feishu config file not found: {path}")
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    if not isinstance(config, dict):
+        raise ValueError("Feishu config must be a JSON object.")
+    return config
+
+
+def _pick(config: dict, *keys: str) -> str:
+    for key in keys:
+        value = config.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def apply_feishu_config(args: argparse.Namespace, config: dict) -> None:
+    """Apply JSON Feishu config values as CLI defaults (CLI flags win)."""
+    if not config:
+        return
+    input_cfg = config.get("input") or config.get("read") or config.get("base") or {}
+    writeback_cfg = config.get("writeback") or config.get("output") or {}
+    source_cfg = config.get("sourceExtractor") or {}
+    if not isinstance(input_cfg, dict) or not isinstance(writeback_cfg, dict) or not isinstance(source_cfg, dict):
+        raise ValueError("Feishu config input/writeback/sourceExtractor sections must be JSON objects.")
+
+    args.base_url = args.base_url or _pick(input_cfg, "baseUrl", "url")
+    args.base_token = args.base_token or _pick(input_cfg, "baseToken", "base_token")
+    args.table_id = args.table_id or _pick(input_cfg, "tableId", "table_id")
+    args.view_id = args.view_id or _pick(input_cfg, "viewId", "view_id")
+    args.answer_table_id = args.answer_table_id or _pick(writeback_cfg, "answerTableId", "answer_table_id")
+    args.source_table_id = args.source_table_id or _pick(writeback_cfg, "sourceTableId", "source_table_id", "aiSourceTableId", "ai_source_table_id")
+    args.source_base_token = args.source_base_token or _pick(writeback_cfg, "baseToken", "base_token") or _pick(source_cfg, "baseToken", "base_token")
+    args.collect_account = args.collect_account or _pick(config, "collectAccount", "collect_account")
 
 
 def question_artifact_dir(output: str, session_name: str, index: int) -> str:
@@ -493,6 +537,8 @@ def force_quick_mode(task: dict) -> None:
 def main() -> None:
     """CLI entry point for the Qianwen runner."""
     args = parse_args()
+    feishu_config = load_feishu_config(args.feishu_config)
+    apply_feishu_config(args, feishu_config)
     validate_args(args)
     loaded = {"task": load_task(args.task), "taskPath": str(Path(args.task).resolve()), "source": "task-json"} if args.task else build_task_from_feishu(args)
     task = normalize_task(loaded["task"]) if not args.task else loaded["task"]
@@ -530,7 +576,7 @@ def main() -> None:
                 "summary": summarize_task(task),
                 "generatedTask": loaded.get("task") if loaded.get("source") == "feishu-base" else None,
                 "skipped": loaded.get("skipped"),
-                "plannedWriteback": planned_writeback(task, args.writeback, args.mark_collected),
+                "plannedWriteback": planned_writeback(task, args.writeback, args.mark_collected, answer_table_id=args.answer_table_id, source_table_id=args.source_table_id),
                 "sourceExtractor": task.get("options", {}).get("sourceExtractor"),
             },
             ensure_ascii=False,
@@ -541,6 +587,7 @@ def main() -> None:
         raise ValueError("No Feishu rows selected. Check 是否本次采集.")
     writeback_context = None
     if loaded.get("source") == "feishu-base":
+        planned = planned_writeback(task, True, answer_table_id=args.answer_table_id, source_table_id=args.source_table_id)
         writeback_context = {
             "enabled": args.writeback,
             "base": loaded["base"],
@@ -548,23 +595,25 @@ def main() -> None:
             "collectAccount": args.collect_account or task.get("options", {}).get("collectAccount"),
             "larkCli": args.lark_cli,
             "dryRun": args.dry_run,
-            "answerTableId": planned_writeback(task, True)["answerTableId"],
-            "sourceTableId": planned_writeback(task, True)["sourceTableId"],
+            "answerTableId": planned["answerTableId"],
+            "sourceTableId": planned["sourceTableId"],
         }
     elif args.writeback:
         from .feishu_base import FEISHU_ANSWER_TABLE_ID, FEISHU_SOURCE_TABLE_ID
         output_base_token = args.base_token or args.source_base_token
         if not output_base_token:
             raise ValueError("--base-token is required for task JSON writeback.")
+        answer_table_id = args.answer_table_id or FEISHU_ANSWER_TABLE_ID
+        source_table_id = args.source_table_id or FEISHU_SOURCE_TABLE_ID
         writeback_context = {
             "enabled": True,
-            "base": {"baseToken": output_base_token, "tableId": FEISHU_ANSWER_TABLE_ID},
+            "base": {"baseToken": output_base_token, "tableId": answer_table_id},
             "markCollected": False,
             "collectAccount": args.collect_account or task.get("options", {}).get("collectAccount"),
             "larkCli": args.lark_cli,
             "dryRun": args.dry_run,
-            "answerTableId": FEISHU_ANSWER_TABLE_ID,
-            "sourceTableId": FEISHU_SOURCE_TABLE_ID,
+            "answerTableId": answer_table_id,
+            "sourceTableId": source_table_id,
         }
     # —— 构建 JS 来源提取器上下文 ——
     # 触发条件：CLI --extract-sources 或 task.options.sourceExtractor.enabled
