@@ -14,6 +14,7 @@
  */
 
 const fs = require('fs');
+const https = require('https');
 const { chromium } = require('playwright-core');
 
 const DEFAULT_CDP_URL = process.env.CDP_URL || 'http://127.0.0.1:9222';
@@ -122,102 +123,13 @@ async function extractDeepSeekSourcesViaApi(page, shareId, timeout = 15000) {
     return { ok: false, reason: 'unexpected-api-structure', topKeys: json ? Object.keys(json) : [] };
   }
 
-  // Collect sources from fragments[].results (full response format).
-  const rawSources = [];
-  let assistantContent = '';
-  let thinkingContent = '';
-  let thinkingElapsedSeconds = null;
-  let searchEnabled = false;
+  // Collect sources + answer/meta from the message list (handles fragments[] and
+  // both search_results shapes).
+  const { rawSources, assistantContent, thinkingContent, thinkingElapsedSeconds, searchEnabled } = collectFromMessages(messages);
 
-  for (const message of messages) {
-    const role = String(message.role || '').toUpperCase();
-
-    // New format: fragments[].results
-    if (Array.isArray(message.fragments)) {
-      for (const frag of message.fragments) {
-        if (/SEARCH/i.test(frag.type) && Array.isArray(frag.results)) {
-          rawSources.push(...frag.results);
-        }
-        if (frag.type === 'RESPONSE' && typeof frag.content === 'string') {
-          assistantContent = frag.content;
-        }
-        if (frag.type === 'THINK' && typeof frag.content === 'string') {
-          thinkingContent += (thinkingContent ? '\n' : '') + frag.content;
-        }
-      }
-    }
-
-    // search_results appears in two shapes across API versions:
-    //   - object form: { results: [...] }           (older full responses)
-    //   - array form:  [ {url,title,snippet,...} ]   (current share-content API)
-    // The array form is what the public/unauthenticated content API returns, so
-    // the page's own request yields it whenever the desktop session is not
-    // authenticated. Handle both, otherwise real sources are silently dropped
-    // and the result is mislabelled "partial".
-    const sr = message.search_results;
-    if (Array.isArray(sr)) {
-      rawSources.push(...sr);
-    } else if (sr && Array.isArray(sr.results)) {
-      rawSources.push(...sr.results);
-    }
-
-    if (role === 'ASSISTANT') {
-      if (!assistantContent && typeof message.content === 'string') assistantContent = message.content;
-      if (!thinkingContent && typeof message.thinking_content === 'string') thinkingContent = message.thinking_content;
-      if (thinkingElapsedSeconds === null) thinkingElapsedSeconds = message.thinking_elapsed_secs || null;
-      searchEnabled = Boolean(message.search_enabled);
-    }
-  }
-
-  // Resilience fallback: if the intercepted (possibly unauthenticated) response
-  // carried no sources, fetch the PUBLIC share-content API directly from the page
-  // context. It reliably returns messages[].search_results[] even without a Bearer
-  // token — exactly the case that produced false "partial" results when the desktop
-  // Chrome session lost its login mid-run.
-  if (!rawSources.length) {
-    try {
-      const publicJson = await page.evaluate(async (sid) => {
-        const resp = await fetch(`/api/v0/share/content?share_id=${sid}`, { credentials: 'omit' });
-        return resp.ok ? resp.json() : null;
-      }, shareId);
-      const publicMessages = publicJson && publicJson.data && publicJson.data.biz_data
-        && Array.isArray(publicJson.data.biz_data.messages) ? publicJson.data.biz_data.messages : [];
-      for (const message of publicMessages) {
-        const sr = message.search_results;
-        if (Array.isArray(sr)) rawSources.push(...sr);
-        else if (sr && Array.isArray(sr.results)) rawSources.push(...sr.results);
-        if (!assistantContent && String(message.role || '').toUpperCase() === 'ASSISTANT'
-          && typeof message.content === 'string') {
-          assistantContent = message.content;
-        }
-      }
-    } catch {
-      // best-effort; leave rawSources empty if the fallback fetch also fails
-    }
-  }
-
-  // Deduplicate by URL and build normalized output.
-  const seen = new Set();
-  const sources = [];
-  for (const item of rawSources) {
-    const url = String(item.url || item.link || item.source_url || item.sourceUrl || item.uri || item.normalized_url || '');
-    if (!url || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
-    seen.add(url);
-    const platform = String(item.site_name || item.siteName || item.platform || item.source_name || item.sourceName || item.name || '').trim()
-      || platformFromUrl(url);
-    sources.push({
-      index: sources.length + 1,
-      title: String(item.title || item.name || item.snippet_title || item.page_title || '').trim() || url,
-      url,
-      normalizedUrl: String(item.normalized_url || item.normalizedUrl || url),
-      rawUrl: String(item.raw_url || item.rawUrl || url),
-      platform,
-      summary: String(item.summary || item.snippet || item.description || item.excerpt || '').trim().slice(0, 2000),
-      publishTime: String(item.publish_time || item.publishTime || item.date || item.published_at || '').trim(),
-      siteIcon: String(item.site_icon || item.siteIcon || '').trim(),
-      type: String(item.type || item.source_type || item.sourceType || '').trim(),
-    });
-  }
+  // Deduplicate by URL and build normalized output (shared with the public-API
+  // fallback so both code paths stay in sync).
+  const sources = buildSourcesFromRaw(rawSources);
 
   return {
     ok: sources.length > 0,
@@ -239,6 +151,106 @@ async function extractDeepSeekSourcesViaApi(page, shareId, timeout = 15000) {
 
 function platformFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+// Normalize + dedupe raw source objects (from either the CDP intercept or the
+// public API) into the stable output shape.
+function buildSourcesFromRaw(rawSources) {
+  const seen = new Set();
+  const sources = [];
+  for (const item of rawSources || []) {
+    const url = String(item.url || item.link || item.source_url || item.sourceUrl || item.uri || item.normalized_url || '');
+    if (!url || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    const platform = String(item.site_name || item.siteName || item.platform || item.source_name || item.sourceName || item.name || '').trim()
+      || platformFromUrl(url);
+    sources.push({
+      index: sources.length + 1,
+      title: String(item.title || item.name || item.snippet_title || item.page_title || '').trim() || url,
+      url,
+      normalizedUrl: String(item.normalized_url || item.normalizedUrl || url),
+      rawUrl: String(item.raw_url || item.rawUrl || url),
+      platform,
+      summary: String(item.summary || item.snippet || item.description || item.excerpt || '').trim().slice(0, 2000),
+      publishTime: String(item.publish_time || item.publishTime || item.date || item.published_at || '').trim(),
+      siteIcon: String(item.site_icon || item.siteIcon || '').trim(),
+      type: String(item.type || item.source_type || item.sourceType || '').trim(),
+    });
+  }
+  return sources;
+}
+
+// Pull sources + answer/meta out of a share-content `messages` array. Handles
+// both fragments[].results and the search_results object/array shapes.
+function collectFromMessages(messages) {
+  const rawSources = [];
+  let assistantContent = '';
+  let thinkingContent = '';
+  let thinkingElapsedSeconds = null;
+  let searchEnabled = false;
+  for (const message of messages || []) {
+    const role = String(message.role || '').toUpperCase();
+    if (Array.isArray(message.fragments)) {
+      for (const frag of message.fragments) {
+        if (/SEARCH/i.test(frag.type) && Array.isArray(frag.results)) rawSources.push(...frag.results);
+        if (frag.type === 'RESPONSE' && typeof frag.content === 'string') assistantContent = frag.content;
+        if (frag.type === 'THINK' && typeof frag.content === 'string') thinkingContent += (thinkingContent ? '\n' : '') + frag.content;
+      }
+    }
+    const sr = message.search_results;
+    if (Array.isArray(sr)) rawSources.push(...sr);
+    else if (sr && Array.isArray(sr.results)) rawSources.push(...sr.results);
+    if (role === 'ASSISTANT') {
+      if (!assistantContent && typeof message.content === 'string') assistantContent = message.content;
+      if (!thinkingContent && typeof message.thinking_content === 'string') thinkingContent = message.thinking_content;
+      if (thinkingElapsedSeconds === null) thinkingElapsedSeconds = message.thinking_elapsed_secs || null;
+      searchEnabled = Boolean(message.search_enabled);
+    }
+  }
+  return { rawSources, assistantContent, thinkingContent, thinkingElapsedSeconds, searchEnabled };
+}
+
+// Reliable fallback: fetch the PUBLIC share-content API over plain HTTPS (no
+// browser, no auth). It returns the same answer + search_results[] as the
+// authenticated page request, so it recovers sources whenever the CDP intercept
+// fails to capture the response or Chrome/CDP is unavailable.
+function fetchPublicShareViaNode(shareId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const url = `https://chat.deepseek.com/api/v0/share/content?share_id=${shareId}`;
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const bizData = json && json.data && json.data.biz_data;
+          const messages = bizData && Array.isArray(bizData.messages) ? bizData.messages : [];
+          const meta = collectFromMessages(messages);
+          const sources = buildSourcesFromRaw(meta.rawSources);
+          resolve({
+            ok: sources.length > 0,
+            reason: sources.length ? '' : 'sources-not-found-in-public-api',
+            url,
+            title: (bizData && bizData.title) || '',
+            apiPath: 'data.biz_data.messages[].search_results[] (public)',
+            sourceFormat: 'deepseek_share_content_public_api',
+            shareId,
+            messageCount: messages.length,
+            answer: meta.assistantContent,
+            thinkingContent: meta.thinkingContent,
+            thinkingElapsedSeconds: meta.thinkingElapsedSeconds,
+            searchEnabled: meta.searchEnabled,
+            count: sources.length,
+            sources,
+          });
+        } catch (err) {
+          resolve({ ok: false, reason: 'public-api-parse-failed', shareId, error: String((err && err.message) || err), count: 0, sources: [] });
+        }
+      });
+    });
+    req.on('error', (err) => resolve({ ok: false, reason: 'public-api-request-failed', shareId, error: String((err && err.message) || err), count: 0, sources: [] }));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve({ ok: false, reason: 'public-api-timeout', shareId, count: 0, sources: [] }); });
+  });
 }
 
 function pickDeepSeekPage(contexts, shareUrl) {
@@ -354,29 +366,52 @@ async function waitForDeepSeekReady(page, timeout = 15000) {
  * @returns {Promise<object>} Extraction result with sources array
  */
 async function extractSources(cdpUrl, shareUrl, timeout = 15000) {
-  const browser = await chromium.connectOverCDP(cdpUrl);
+  const shareId = extractShareId(shareUrl);
+  if (!shareId) throw new Error('Could not extract share_id from --url argument.');
+
+  // Primary: CDP intercept of the authenticated page request (richest data,
+  // including thinking content, when the desktop session is healthy).
+  let cdpResult = null;
   try {
-    const shareId = extractShareId(shareUrl);
-    if (!shareId) throw new Error('Could not extract share_id from --url argument.');
-
-    let page = pickDeepSeekPage(browser.contexts(), shareUrl);
-    const onSharePage = page && page.url().includes(shareId);
-    if (!onSharePage) {
-      const context = browser.contexts()[0];
-      page = await context.newPage();
-      await page.goto(shareUrl, { waitUntil: 'domcontentloaded', timeout });
+    const browser = await chromium.connectOverCDP(cdpUrl);
+    try {
+      let page = pickDeepSeekPage(browser.contexts(), shareUrl);
+      const onSharePage = page && page.url().includes(shareId);
+      if (!onSharePage) {
+        const context = browser.contexts()[0];
+        page = await context.newPage();
+        await page.goto(shareUrl, { waitUntil: 'domcontentloaded', timeout });
+      }
+      await page.bringToFront();
+      // extractDeepSeekSourcesViaApi reloads the page to intercept the API response.
+      cdpResult = await extractDeepSeekSourcesViaApi(page, shareId, timeout);
+      await page.close().catch(() => {});
+    } finally {
+      await browser.close().catch(() => {});
     }
-
-    await page.bringToFront();
-
-    // extractDeepSeekSourcesViaApi reloads the page to intercept the API response.
-    const result = await extractDeepSeekSourcesViaApi(page, shareId, timeout);
-
-    await page.close().catch(() => {});
-    return result;
-  } finally {
-    await browser.close().catch(() => {});
+  } catch (err) {
+    cdpResult = { ok: false, reason: `cdp-failed: ${(err && err.message) || err}`, count: 0, sources: [] };
   }
+
+  if (cdpResult && cdpResult.ok && cdpResult.count) return cdpResult;
+
+  // Fallback: the CDP intercept is timing-sensitive (the page reload may not
+  // re-issue the API call in time) and breaks when the desktop session loses
+  // auth or Chrome/CDP is down. The PUBLIC share-content API returns the same
+  // answer + search_results[] over plain HTTPS, so use it to recover sources.
+  // This is what eliminates the false "partial" results.
+  const fallback = await fetchPublicShareViaNode(shareId, timeout);
+  if (fallback.ok) {
+    if (!fallback.answer && cdpResult && cdpResult.answer) fallback.answer = cdpResult.answer;
+    if (!fallback.thinkingContent && cdpResult && cdpResult.thinkingContent) fallback.thinkingContent = cdpResult.thinkingContent;
+    return fallback;
+  }
+
+  // Neither path produced sources. When the public API was actually reached and
+  // genuinely had none, that is the authoritative verdict (real "no citations");
+  // otherwise fall back to the CDP context for diagnostics.
+  if (fallback.reason === 'sources-not-found-in-public-api') return fallback;
+  return cdpResult || fallback;
 }
 
 async function main() {
