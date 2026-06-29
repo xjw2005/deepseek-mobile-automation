@@ -1,10 +1,17 @@
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .time_utils import now_iso, stamp
+
+
+# lark-cli intermittently returns empty/non-JSON output on transient network or
+# Feishu API hiccups. Retry writes this many times before giving up so a single
+# blip does not permanently drop a record.
+FEISHU_WRITE_ATTEMPTS = 4
 
 
 FEISHU_ANSWER_TABLE_ID = "tblaV1deA4L9hzze"
@@ -302,8 +309,13 @@ def build_task_from_feishu(args) -> dict:
     return {"task": task, "taskPath": None, "base": {**base, "rowStart": base_start, "rowEnd": base_end, "rowRange": [base_start, base_end]}, "skipped": skipped, "source": "feishu-base"}
 
 
-def create_feishu_records(base: dict, table_id: str, fields: list[str], rows: list[list], lark_cli: str = "lark-cli", dry_run: bool = False) -> dict:
-    """Create one or more records in Feishu."""
+def create_feishu_records(base: dict, table_id: str, fields: list[str], rows: list[list], lark_cli: str = "lark-cli", dry_run: bool = False, attempts: int = FEISHU_WRITE_ATTEMPTS) -> dict:
+    """Create one or more records in Feishu, retrying transient CLI/API failures.
+
+    A single lark-cli hiccup (empty/non-JSON output) must not permanently drop the
+    write — that is how 56 answers were lost in one run. Retry with linear backoff
+    before surfacing the error to the caller.
+    """
     if not rows:
         return {"skipped": True, "reason": "no-rows", "tableId": table_id, "count": 0}
     args = [
@@ -316,7 +328,16 @@ def create_feishu_records(base: dict, table_id: str, fields: list[str], rows: li
     ]
     if dry_run:
         args.append("--dry-run")
-    return run_json_command_with_payload(lark_cli, args, {"fields": fields, "rows": rows})
+    payload = {"fields": fields, "rows": rows}
+    last_error: FeishuError | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return run_json_command_with_payload(lark_cli, args, payload)
+        except FeishuError as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(min(2 * attempt, 8))
+    raise last_error
 
 
 def update_feishu_task_rows(base: dict, record_ids: list[str], lark_cli: str = "lark-cli", dry_run: bool = False) -> dict:
@@ -375,7 +396,20 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
     dry_run = bool(writeback_context.get("dryRun"))
     answer_table_id = writeback_context.get("answerTableId") or FEISHU_ANSWER_TABLE_ID
     source_table_id = writeback_context.get("sourceTableId") or FEISHU_SOURCE_TABLE_ID
-    answer_result = create_feishu_records(base, answer_table_id, ANSWER_WRITEBACK_FIELDS, rows["answerRows"], lark_cli, dry_run)
+    # Isolate the answer write: after exhausting retries a writeback failure must be
+    # recorded, not raised, otherwise a successfully captured answer is lost and the
+    # source summary below never runs.
+    try:
+        answer_result = create_feishu_records(base, answer_table_id, ANSWER_WRITEBACK_FIELDS, rows["answerRows"], lark_cli, dry_run)
+    except FeishuError as exc:
+        answer_result = {
+            "ok": False,
+            "skipped": False,
+            "reason": "answer-writeback-failed",
+            "error": str(exc),
+            "tableId": answer_table_id,
+            "rowCount": len(rows["answerRows"]),
+        }
     # 来源记录由 deepseek-source-extractor JS 脚本直接写入飞书来源表，
     # Python 端不再重复写源；这里仅记录 JS 提取结果以便审计与追踪。
     js_extraction = result.get("sourceExtraction") or {}

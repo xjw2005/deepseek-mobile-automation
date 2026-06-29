@@ -147,9 +147,18 @@ async function extractDeepSeekSourcesViaApi(page, shareId, timeout = 15000) {
       }
     }
 
-    // Old format fallback: search_results (redacted in full responses)
-    if (message.search_results && Array.isArray(message.search_results.results)) {
-      rawSources.push(...message.search_results.results);
+    // search_results appears in two shapes across API versions:
+    //   - object form: { results: [...] }           (older full responses)
+    //   - array form:  [ {url,title,snippet,...} ]   (current share-content API)
+    // The array form is what the public/unauthenticated content API returns, so
+    // the page's own request yields it whenever the desktop session is not
+    // authenticated. Handle both, otherwise real sources are silently dropped
+    // and the result is mislabelled "partial".
+    const sr = message.search_results;
+    if (Array.isArray(sr)) {
+      rawSources.push(...sr);
+    } else if (sr && Array.isArray(sr.results)) {
+      rawSources.push(...sr.results);
     }
 
     if (role === 'ASSISTANT') {
@@ -157,6 +166,33 @@ async function extractDeepSeekSourcesViaApi(page, shareId, timeout = 15000) {
       if (!thinkingContent && typeof message.thinking_content === 'string') thinkingContent = message.thinking_content;
       if (thinkingElapsedSeconds === null) thinkingElapsedSeconds = message.thinking_elapsed_secs || null;
       searchEnabled = Boolean(message.search_enabled);
+    }
+  }
+
+  // Resilience fallback: if the intercepted (possibly unauthenticated) response
+  // carried no sources, fetch the PUBLIC share-content API directly from the page
+  // context. It reliably returns messages[].search_results[] even without a Bearer
+  // token — exactly the case that produced false "partial" results when the desktop
+  // Chrome session lost its login mid-run.
+  if (!rawSources.length) {
+    try {
+      const publicJson = await page.evaluate(async (sid) => {
+        const resp = await fetch(`/api/v0/share/content?share_id=${sid}`, { credentials: 'omit' });
+        return resp.ok ? resp.json() : null;
+      }, shareId);
+      const publicMessages = publicJson && publicJson.data && publicJson.data.biz_data
+        && Array.isArray(publicJson.data.biz_data.messages) ? publicJson.data.biz_data.messages : [];
+      for (const message of publicMessages) {
+        const sr = message.search_results;
+        if (Array.isArray(sr)) rawSources.push(...sr);
+        else if (sr && Array.isArray(sr.results)) rawSources.push(...sr.results);
+        if (!assistantContent && String(message.role || '').toUpperCase() === 'ASSISTANT'
+          && typeof message.content === 'string') {
+          assistantContent = message.content;
+        }
+      }
+    } catch {
+      // best-effort; leave rawSources empty if the fallback fetch also fails
     }
   }
 

@@ -89,12 +89,25 @@ function createFeishuRecords(baseToken, tableId, fields, rows, dryRun = false) {
     '--format', 'json',
   ];
   if (dryRun) args.push('--dry-run');
+  const attempts = 4;
   try {
-    const result = execFileSync('powershell', ['-ExecutionPolicy', 'Bypass', '-Command', `lark-cli ${args.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')}`], {
-      encoding: 'utf8',
-      maxBuffer: 50 * 1024 * 1024,
-    });
-    return JSON.parse(result);
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const result = execFileSync('powershell', ['-ExecutionPolicy', 'Bypass', '-Command', `lark-cli ${args.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')}`], {
+          encoding: 'utf8',
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        return JSON.parse(result);
+      } catch (err) {
+        // Transient lark-cli/Feishu hiccup (empty or non-JSON output): retry with backoff.
+        lastError = err;
+        if (attempt < attempts) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(2000 * attempt, 8000));
+        }
+      }
+    }
+    throw lastError;
   } finally {
     fs.unlinkSync(tmpFile);
   }
