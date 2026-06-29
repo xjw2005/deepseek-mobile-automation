@@ -18,7 +18,7 @@
 - **豆包（Legacy Flow）**：`mobile_auto_doubao/`，入口为顶层 `runner.py`，目标 App `com.larus.nova`。已停止迭代。
 - **千问（Active Flow）**：`mobile_auto_qianwen/`，入口为 `python -m mobile_auto_qianwen.runner`，目标 App `com.aliyun.tongyi`。是当前推荐基线。
 
-两套实现共享相同的飞书 Base 字段约定（`问题` / `关联自然问句` / `是否开启深度思考` / `是否本次采集` / `AI回答采集` / `引用源明细`），与桌面端 DeepSeek CDP runner 对齐。
+两套实现共享相同的飞书 Base 字段约定（`问题文本` / `问题ID` / `是否开启深度思考` / `是否本次采集` / `AI回答采集` / `引用源明细`），与桌面端 DeepSeek CDP runner 对齐。
 
 ### 1.2 目标
 

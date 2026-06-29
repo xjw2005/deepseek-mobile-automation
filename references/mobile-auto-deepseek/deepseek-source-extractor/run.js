@@ -6,12 +6,12 @@
  * then write them to a Feishu Bitable.
  *
  * Usage:
- *   node run.js --url "<deepseek-share-url>" --natural-question NQ-001 \
+ *   node run.js --url "<deepseek-share-url>" --question-id NQ-001 \
  *     --base-token <token> --table-id <table-id>
  *
  * Or step-by-step:
  *   node extract-sources.js --url "..." --output sources.json
- *   node write-feishu.js --sources sources.json --base-token ... --table-id ... --natural-question NQ-001
+ *   node write-feishu.js --sources sources.json --base-token ... --table-id ... --question-id NQ-001
  */
 
 const fs = require('fs');
@@ -39,6 +39,7 @@ function parseArgs(argv) {
     if (arg === '--cdp') args.cdp = argv[++i];
     else if (arg === '--url') args.url = argv[++i];
     else if (arg === '--natural-question') args.naturalQuestion = argv[++i];
+    else if (arg === '--question-id') args.naturalQuestion = argv[++i];
     else if (arg === '--base-token') args.baseToken = argv[++i];
     else if (arg === '--table-id') args.tableId = argv[++i];
     else if (arg === '--output') args.output = argv[++i];
@@ -63,12 +64,13 @@ function printHelp() {
 Extract reference sources from a DeepSeek share page and write them to Feishu Bitable.
 
 Usage:
-  node run.js --url "<deepseek-share-url>" --natural-question NQ-001 \\
+  node run.js --url "<deepseek-share-url>" --question-id NQ-001 \\
     --base-token <token> --table-id <table-id>
 
 Options:
   --url <url>               DeepSeek share URL (required for extract step)
-  --natural-question <id>    Natural question ID to associate (required for write step)
+  --natural-question <id>    Question ID to associate (required for write step)
+  --question-id <id>         Alias for --natural-question
   --base-token <token>       Feishu Bitable app_token (required for write step)
   --table-id <id>            Feishu Bitable table_id (required for write step)
   --cdp <url>                CDP endpoint. Default: ${DEFAULT_CDP_URL}
@@ -84,18 +86,18 @@ Examples:
   # Full pipeline
   node run.js \\
     --url "https://chat.deepseek.com/share/o7a2kswga666sdv2di" \\
-    --natural-question NQ-001 \\
-    --base-token UiE3bhcHRaCE01sh5Anc1AZanKd \\
-    --table-id tblOa8d90WFOV7hG
+    --question-id NQ-001 \\
+    --base-token HdDPbhFghaDQgSsqLZhcIQxqnNf \\
+    --table-id tblz0H72enGdxc1l
 
   # Extract only
   node run.js --url "https://chat.deepseek.com/share/xxxx" --extract-only --output sources.json
 
   # Write only from existing file
   node run.js --write-only --sources sources.json \\
-    --natural-question NQ-001 \\
-    --base-token UiE3bhcHRaCE01sh5Anc1AZanKd \\
-    --table-id tblOa8d90WFOV7hG
+    --question-id NQ-001 \\
+    --base-token HdDPbhFghaDQgSsqLZhcIQxqnNf \\
+    --table-id tblz0H72enGdxc1l
 `);
 }
 
@@ -106,12 +108,12 @@ async function main() {
     if (!args.sources) throw new Error('--sources is required for --write-only mode');
     if (!args.baseToken) throw new Error('--base-token is required');
     if (!args.tableId) throw new Error('--table-id is required');
-    if (!args.naturalQuestion) throw new Error('--natural-question is required');
+    if (!args.naturalQuestion) throw new Error('--natural-question/--question-id is required');
   } else if (args.extractOnly) {
     if (!args.url) throw new Error('--url is required for --extract-only mode');
   } else {
     if (!args.url) throw new Error('--url is required');
-    if (!args.naturalQuestion) throw new Error('--natural-question is required');
+    if (!args.naturalQuestion) throw new Error('--natural-question/--question-id is required');
     if (!args.baseToken) throw new Error('--base-token is required');
     if (!args.tableId) throw new Error('--table-id is required');
   }
@@ -150,7 +152,7 @@ async function main() {
   console.log(`\n[2/2] Writing ${sourcesData.sources.length} sources to Feishu Bitable...`);
   console.log(`      Base: ${args.baseToken}`);
   console.log(`      Table: ${args.tableId}`);
-  console.log(`      Natural question: ${args.naturalQuestion}`);
+  console.log(`      Question ID: ${args.naturalQuestion}`);
   console.log('      ---');
   const { rows } = buildRows(sourcesData, args.naturalQuestion);
   rows.forEach((row, i) => {

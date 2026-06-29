@@ -1,6 +1,6 @@
 ---
 name: deepseek-mobile-automation
-description: Drives DeepSeek Android via ADB to capture answers/share links, extracts real source URLs via a Node.js CDP script, and writes to Feishu. Invoke for DeepSeek mobile runs or share-page source extraction. NEW v2.1: --link-only mode skips mobile thinking capture, fetches all content from desktop share page API in ~3 sec. --feishu-config externalizes the Feishu answer/source table IDs into a JSON (switch environments without source edits).
+description: Drives DeepSeek Android via ADB to capture answers/share links, extracts real source URLs via a Node.js CDP script, and writes to Feishu. Invoke for DeepSeek mobile runs or share-page source extraction. NEW v2.0: --link-only mode skips mobile thinking capture, fetches all content from desktop share page API in ~3 sec. --feishu-config externalizes the Feishu answer/source table IDs into a JSON (switch environments without source edits).
 ---
 
 # DeepSeek Mobile Automation
@@ -111,6 +111,7 @@ python -m mobile_auto_deepseek.runner `
 - `--source-table-id` — Feishu table_id for the source table (flows to the JS extractor).
 
 Only table IDs change between Feishu environments — field names and column structure stay fixed (`feishu_base.py` `ANSWER_WRITEBACK_FIELDS` / `SOURCE_WRITEBACK_FIELDS`).
+Current Feishu input rows use `问题文本`, `问题ID`, and `是否开启深度思考`; `是否本次采集` is optional and defaults to `是` when absent. Legacy input fields `问题` and `关联自然问句` are still tolerated during migration.
 
 For parallel runs, pass a unique `--serial` and a unique `--output` per process.
 The runner refuses to guess when multiple adb devices are online, which prevents cross-device runs.
@@ -123,7 +124,7 @@ Use the JS extractor on its own when you already have a DeepSeek share URL.
 # Extract + write to Feishu
 node deepseek-source-extractor\run.js `
   --url "https://chat.deepseek.com/share/<share_id>" `
-  --natural-question NQ-001 `
+  --question-id NQ-001 `
   --base-token <feishu_app_token> --table-id <feishu_table_id>
 
 # Extract only
@@ -134,7 +135,7 @@ node deepseek-source-extractor\run.js `
 # Write only from existing JSON
 node deepseek-source-extractor\run.js `
   --write-only --sources sources.json `
-  --natural-question NQ-001 `
+  --question-id NQ-001 `
   --base-token <feishu_app_token> --table-id <feishu_table_id>
 ```
 
@@ -171,7 +172,7 @@ The JS extractor needs Chrome running with `--remote-debugging-port=9222` and th
 
 - `run.js` — Main entry. Parses args, calls extract-sources.js, then write-feishu.js. Supports `--extract-only`, `--write-only`, `--dry-run`.
 - `extract-sources.js` — Connects to Chrome via CDP (`connectOverCDP`), finds the DeepSeek share tab by share_id, replays the share/content API from the page context, walks `data.session.record_list[].response_messages[].meta_data.sources[].content.list[]` (and the `multi_load[].content.docs[]` variant), and returns clean source objects with real URLs.
-- `write-feishu.js` — Builds Feishu rows (来源标题, 来源URL, 引用来源类型, 引用来源平台, 关联自然问句) and creates records via `lark-cli base +record-batch-create`.
+- `write-feishu.js` — Builds Feishu rows (来源标题, 来源URL, 引用来源类型, 引用来源平台, 问题ID) and creates records via `lark-cli base +record-batch-create`.
 - `package.json` — Declares `playwright-core` dependency.
 
 ## Operating Rules

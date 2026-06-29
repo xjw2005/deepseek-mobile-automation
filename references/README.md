@@ -208,10 +208,10 @@ Instead of a task JSON, the runner can read selected rows from a Feishu Base.
 
 Required fields in the Feishu table:
 
-- `问题` — question text sent to DeepSeek.
-- `关联自然问句` — written back with the answer/source rows.
+- `问题文本` — question text sent to DeepSeek. Legacy input field `问题` is still accepted during migration.
+- `问题ID` — written back with the answer/source rows. The runner still accepts legacy input field `关联自然问句` during migration.
 - `是否开启深度思考` — per-row thinking request. `是` force-enables it; other values leave the current App switch untouched.
-- `是否本次采集` — only rows set to `是` are selected.
+- `是否本次采集` — optional. Only rows set to `是` are selected when the field exists; if absent, every row is treated as selected.
 
 ### Standard Mode (mobile capture + JS extractor)
 
@@ -252,7 +252,7 @@ python -m mobile_auto_deepseek.runner `
 
 **Important:** `--link-only` **must** be paired with `--extract-sources`. Without it, mobile capture is skipped and no API fallback exists — you get empty results. The runner validates this at startup and errors early if violated.
 
-`--base-start` and `--base-end` are 1-based and inclusive. The runner reads that row range first, then only keeps rows whose `是否本次采集` value is `是`.
+`--base-start` and `--base-end` are 1-based and inclusive. The runner reads that row range first, then only keeps rows whose `是否本次采集` value is `是`; if the field is absent, every row is treated as selected.
 
 If `lark-cli` is not on `PATH`, pass `--lark-cli <path-to-lark-cli.cmd>`.
 
@@ -318,7 +318,7 @@ The JS extractor (`deepseek-source-extractor/run.js`) supports three modes:
 1. **Extract + write** (default, full pipeline):
 
 ```powershell
-node run.js --url "https://chat.deepseek.com/share/<id>" --natural-question NQ-001 --base-token <token> --table-id <table-id>
+node run.js --url "https://chat.deepseek.com/share/<id>" --question-id NQ-001 --base-token <token> --table-id <table-id>
 ```
 
 2. **Extract only** (no Feishu writeback):
@@ -330,7 +330,7 @@ node run.js --url "https://chat.deepseek.com/share/<id>" --extract-only --output
 3. **Write only** (from existing JSON):
 
 ```powershell
-node run.js --write-only --sources sources.json --natural-question NQ-001 --base-token <token> --table-id <table-id>
+node run.js --write-only --sources sources.json --question-id NQ-001 --base-token <token> --table-id <table-id>
 ```
 
 The extractor needs Chrome running with `--remote-debugging-port=9222` and the target DeepSeek share page already open.
@@ -456,7 +456,7 @@ Inspect the captured XML in `results/snapshots/<session>-<index>-<stamp>/*.xml` 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     Feishu Base (optional)                   │
-│  问题, 关联自然问句, 是否开启深度思考, 是否本次采集          │
+│  问题文本, 问题ID, 是否开启深度思考, 是否本次采集(可选) │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -477,7 +477,7 @@ Inspect the captured XML in `results/snapshots/<session>-<index>-<stamp>/*.xml` 
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                     Feishu Bitable                           │
-│  AI回答采集 (answer table): 采集账号, 自然问句, AI回答, ...  │
+│  AI回答采集主表 (answer table): 采集账号, 问题文本, AI平台, AI回答, ... │
 │  引用源明细 (source table): 来源标题, 来源URL, ...           │
 └─────────────────────────────────────────────────────────────┘
 ```

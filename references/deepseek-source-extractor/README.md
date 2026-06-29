@@ -27,16 +27,16 @@ chrome.exe --remote-debugging-port=9222
 # 完整流程：提取 + 写回飞书
 node run.js \
   --url "https://chat.deepseek.com/share/o7a2kswga666sdv2di" \
-  --natural-question NQ-001 \
+  --question-id NQ-001 \
   --base-token <app_token> \
-  --table-id tblOa8d90WFOV7hG
+  --table-id tblz0H72enGdxc1l
 
 # 仅提取
 node run.js --url "https://chat.deepseek.com/share/xxxx" --extract-only --output sources.json
 
 # 仅写回（从已有 JSON）
 node run.js --write-only --sources sources.json \
-  --natural-question NQ-001 --base-token <app_token> --table-id tblOa8d90WFOV7hG
+  --question-id NQ-001 --base-token <app_token> --table-id tblz0H72enGdxc1l
 ```
 
 ## Files
@@ -47,4 +47,4 @@ node run.js --write-only --sources sources.json \
 
 ## Output fields (写入飞书来源表)
 
-`来源标题`, `来源URL`, `引用来源类型`, `引用来源平台`, `关联自然问句`
+`来源标题`, `来源URL`, `引用来源类型`, `引用来源平台`, `问题ID`
