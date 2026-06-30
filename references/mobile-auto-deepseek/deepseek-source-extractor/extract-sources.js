@@ -210,10 +210,11 @@ function collectFromMessages(messages) {
   return { rawSources, assistantContent, thinkingContent, thinkingElapsedSeconds, searchEnabled };
 }
 
-// Reliable fallback: fetch the PUBLIC share-content API over plain HTTPS (no
-// browser, no auth). It returns the same answer + search_results[] as the
-// authenticated page request, so it recovers sources whenever the CDP intercept
-// fails to capture the response or Chrome/CDP is unavailable.
+// PRIMARY source path: fetch the PUBLIC share-content API over plain HTTPS (no
+// browser, no auth, no shared Chrome state). It returns the same answer +
+// search_results[] as the authenticated page request. Being Chrome-independent,
+// per-question extraction is fully isolated — one question's outcome can never
+// affect the next.
 function fetchPublicShareViaNode(shareId, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const url = `https://chat.deepseek.com/api/v0/share/content?share_id=${shareId}`;
@@ -221,6 +222,12 @@ function fetchPublicShareViaNode(shareId, timeoutMs = 15000) {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
+        if (res.statusCode !== 200) {
+          // Non-200 (e.g. rate limited) — treat as unreachable so the CDP fallback
+          // can try; do NOT mistake it for a genuine "no sources" verdict.
+          resolve({ ok: false, reason: `public-api-http-${res.statusCode}`, shareId, count: 0, sources: [] });
+          return;
+        }
         try {
           const json = JSON.parse(data);
           const bizData = json && json.data && json.data.biz_data;
@@ -365,58 +372,76 @@ async function waitForDeepSeekReady(page, timeout = 15000) {
  * @param {number} timeout - Page readiness timeout in ms
  * @returns {Promise<object>} Extraction result with sources array
  */
+// Bound a promise so a stuck Chrome/CDP call can never hang the extraction. The
+// underlying op may keep running in the background, but this process exits right
+// after returning, so a leaked connection is harmless.
+function withTimeout(promise, ms, timeoutValue) {
+  let timer;
+  const guard = new Promise((resolve) => { timer = setTimeout(() => resolve(timeoutValue), ms); });
+  return Promise.race([
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); return v; },
+      (e) => { clearTimeout(timer); throw e; },
+    ),
+    guard,
+  ]);
+}
+
+// Best-effort CDP intercept of the authenticated page request. Only used when the
+// public API is unreachable. Always closes the tab it opened (never a user tab).
+async function extractViaCdp(cdpUrl, shareUrl, shareId, timeout) {
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  let openedPage = null;
+  try {
+    let page = pickDeepSeekPage(browser.contexts(), shareUrl);
+    const onSharePage = page && page.url().includes(shareId);
+    if (!onSharePage) {
+      const context = browser.contexts()[0];
+      page = await context.newPage();
+      openedPage = page; // only close tabs WE opened, never a pre-existing user tab
+      await page.goto(shareUrl, { waitUntil: 'domcontentloaded', timeout });
+    }
+    await page.bringToFront();
+    return await extractDeepSeekSourcesViaApi(page, shareId, timeout);
+  } finally {
+    if (openedPage) await openedPage.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
 async function extractSources(cdpUrl, shareUrl, timeout = 15000) {
   const shareId = extractShareId(shareUrl);
   if (!shareId) throw new Error('Could not extract share_id from --url argument.');
 
-  // Primary: CDP intercept of the authenticated page request (richest data,
-  // including thinking content, when the desktop session is healthy).
-  let cdpResult = null;
+  // PRIMARY: the public share-content API over plain HTTPS. No browser, no auth,
+  // no shared Chrome state — so each question is fully isolated and one question
+  // can never break the next. This is what removes the Chrome-state cascade.
+  const publicResult = await fetchPublicShareViaNode(shareId, timeout);
+  if (publicResult.ok) return publicResult;
+  // Reached the API and the answer genuinely cites nothing — authoritative verdict,
+  // no reason to spin up Chrome.
+  if (publicResult.reason === 'sources-not-found-in-public-api') return publicResult;
+
+  // FALLBACK (rare): only when the public API itself was unreachable (network/rate
+  // limit). Time-bounded so a stuck Chrome can never hang the run; any failure is
+  // swallowed into a result object rather than thrown.
+  let cdpResult;
   try {
-    const browser = await chromium.connectOverCDP(cdpUrl);
-    let openedPage = null;
-    try {
-      let page = pickDeepSeekPage(browser.contexts(), shareUrl);
-      const onSharePage = page && page.url().includes(shareId);
-      if (!onSharePage) {
-        const context = browser.contexts()[0];
-        page = await context.newPage();
-        openedPage = page; // only close tabs WE opened, never a pre-existing user tab
-        await page.goto(shareUrl, { waitUntil: 'domcontentloaded', timeout });
-      }
-      await page.bringToFront();
-      // extractDeepSeekSourcesViaApi reloads the page to intercept the API response.
-      cdpResult = await extractDeepSeekSourcesViaApi(page, shareId, timeout);
-    } finally {
-      // Always close our tab — even if extraction throws — so repeated runs do not
-      // leak tabs and degrade Chrome (the exact state-accumulation that can make
-      // later extractions flaky).
-      if (openedPage) await openedPage.close().catch(() => {});
-      await browser.close().catch(() => {});
-    }
+    cdpResult = await withTimeout(
+      extractViaCdp(cdpUrl, shareUrl, shareId, timeout),
+      timeout + 10000,
+      { ok: false, reason: 'cdp-timeout', count: 0, sources: [] },
+    );
   } catch (err) {
     cdpResult = { ok: false, reason: `cdp-failed: ${(err && err.message) || err}`, count: 0, sources: [] };
   }
-
   if (cdpResult && cdpResult.ok && cdpResult.count) return cdpResult;
 
-  // Fallback: the CDP intercept is timing-sensitive (the page reload may not
-  // re-issue the API call in time) and breaks when the desktop session loses
-  // auth or Chrome/CDP is down. The PUBLIC share-content API returns the same
-  // answer + search_results[] over plain HTTPS, so use it to recover sources.
-  // This is what eliminates the false "partial" results.
-  const fallback = await fetchPublicShareViaNode(shareId, timeout);
-  if (fallback.ok) {
-    if (!fallback.answer && cdpResult && cdpResult.answer) fallback.answer = cdpResult.answer;
-    if (!fallback.thinkingContent && cdpResult && cdpResult.thinkingContent) fallback.thinkingContent = cdpResult.thinkingContent;
-    return fallback;
-  }
-
-  // Neither path produced sources. When the public API was actually reached and
-  // genuinely had none, that is the authoritative verdict (real "no citations");
-  // otherwise fall back to the CDP context for diagnostics.
-  if (fallback.reason === 'sources-not-found-in-public-api') return fallback;
-  return cdpResult || fallback;
+  // Neither produced sources — return the public verdict, enriched with any
+  // answer/thinking the CDP path managed to capture.
+  if (cdpResult && !publicResult.answer && cdpResult.answer) publicResult.answer = cdpResult.answer;
+  if (cdpResult && !publicResult.thinkingContent && cdpResult.thinkingContent) publicResult.thinkingContent = cdpResult.thinkingContent;
+  return publicResult;
 }
 
 async function main() {
