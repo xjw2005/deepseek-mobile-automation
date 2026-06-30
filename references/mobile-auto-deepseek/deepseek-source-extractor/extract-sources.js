@@ -374,19 +374,24 @@ async function extractSources(cdpUrl, shareUrl, timeout = 15000) {
   let cdpResult = null;
   try {
     const browser = await chromium.connectOverCDP(cdpUrl);
+    let openedPage = null;
     try {
       let page = pickDeepSeekPage(browser.contexts(), shareUrl);
       const onSharePage = page && page.url().includes(shareId);
       if (!onSharePage) {
         const context = browser.contexts()[0];
         page = await context.newPage();
+        openedPage = page; // only close tabs WE opened, never a pre-existing user tab
         await page.goto(shareUrl, { waitUntil: 'domcontentloaded', timeout });
       }
       await page.bringToFront();
       // extractDeepSeekSourcesViaApi reloads the page to intercept the API response.
       cdpResult = await extractDeepSeekSourcesViaApi(page, shareId, timeout);
-      await page.close().catch(() => {});
     } finally {
+      // Always close our tab — even if extraction throws — so repeated runs do not
+      // leak tabs and degrade Chrome (the exact state-accumulation that can make
+      // later extractions flaky).
+      if (openedPage) await openedPage.close().catch(() => {});
       await browser.close().catch(() => {});
     }
   } catch (err) {
