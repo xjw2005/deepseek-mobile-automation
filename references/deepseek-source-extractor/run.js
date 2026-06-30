@@ -130,21 +130,37 @@ async function main() {
     console.log(`      CDP: ${args.cdp}`);
     sourcesData = await extractSources(args.cdp, args.url, args.timeout);
 
-    if (!sourcesData.ok) {
-      console.error(`Extraction failed: ${sourcesData.reason}`);
-      process.exit(1);
-    }
-    console.log(`      Extracted ${sourcesData.count} sources`);
-
+    // Always persist the result first so the bridge can read the answer + source
+    // count regardless of outcome. A result that carries a `sources` array is a
+    // COMPLETED extraction — zero sources just means the answer cited nothing,
+    // which is a valid outcome, NOT a hard failure. Exiting non-zero on zero
+    // sources would discard the answer and trigger 3x wasteful CDP retries.
     if (args.output) {
       fs.writeFileSync(args.output, JSON.stringify(sourcesData, null, 2) + '\n', 'utf8');
       console.log(`      Saved to ${args.output}`);
+    }
+
+    if (Array.isArray(sourcesData.sources)) {
+      console.log(`      Extracted ${sourcesData.count || 0} sources`
+        + (sourcesData.ok ? '' : ` (no sources; reason: ${sourcesData.reason || 'none'}, answer length=${(sourcesData.answer || '').length})`));
+    } else {
+      // No `sources` array at all => extraction genuinely could not run.
+      console.error(`Extraction failed: ${sourcesData.reason}`);
+      process.exit(1);
     }
   }
 
   if (args.extractOnly) {
     console.log('\nExtraction result:');
     console.log(JSON.stringify(sourcesData, null, 2));
+    return;
+  }
+
+  // Step 2: Write to Feishu — skip cleanly when there are no sources to write.
+  // Writing an empty set is a no-op and writeSources rejects ok:false payloads,
+  // so guard here. The answer is already captured in the saved output file.
+  if (!Array.isArray(sourcesData.sources) || sourcesData.sources.length === 0) {
+    console.log('\n[2/2] No sources to write — skipping Feishu source writeback.');
     return;
   }
 
