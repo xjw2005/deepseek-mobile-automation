@@ -15,7 +15,12 @@
 
 const fs = require('fs');
 const https = require('https');
-const { chromium } = require('playwright-core');
+let chromium;
+try {
+  ({ chromium } = require('playwright-core'));
+} catch {
+  ({ chromium } = require('playwright'));
+}
 
 const DEFAULT_CDP_URL = process.env.CDP_URL || 'http://127.0.0.1:9222';
 const SHARE_CONTENT_API = 'https://chat.deepseek.com/api/v0/share/content';

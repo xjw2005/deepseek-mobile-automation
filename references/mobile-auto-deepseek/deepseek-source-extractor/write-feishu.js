@@ -3,7 +3,7 @@
  * Write DeepSeek sources to a Feishu Bitable.
  *
  * Fields written (aligned with the shared source table):
- *   来源标题, 来源URL, 引用来源类型, 引用来源平台, 问题ID
+ *   来源标题, 来源URL, 来源类型, 引用来源平台, 探针单值编码, 来源摘取日期
  */
 
 const fs = require('fs');
@@ -72,6 +72,12 @@ function normalizePlatform(value) {
   return text.replace(/\s+\d{4}([/-]\d{1,2}){0,2}$/u, '').trim();
 }
 
+function captureDateString() {
+  const d = new Date();
+  const pad = value => String(value).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /**
  * Create records in Feishu Bitable via lark-cli.
  * Uses a temp file for --json to avoid shell escaping issues.
@@ -116,17 +122,19 @@ function createFeishuRecords(baseToken, tableId, fields, rows, dryRun = false) {
 /**
  * Build Feishu rows from sources data.
  * @param {object} data - Sources data from extract-sources.js
- * @param {string} naturalQuestion - Question ID
+ * @param {string} naturalQuestion - 探针单值编码
  * @returns {object} { fields, rows }
  */
 function buildRows(data, naturalQuestion) {
-  const fields = ['来源标题', '来源URL', '引用来源类型', '引用来源平台', '问题ID'];
+  const fields = ['来源标题', '来源URL', '来源类型', '引用来源平台', '探针单值编码', '来源摘取日期'];
+  const extractedAt = captureDateString();
   const rows = data.sources.map(source => [
     source.title || source.url || '',
     source.url || '',
     inferSourceType(source),
     normalizePlatform(source.platform),
     naturalQuestion,
+    extractedAt,
   ]);
   return { fields, rows };
 }

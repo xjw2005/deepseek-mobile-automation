@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--writeback", action="store_true", help="Create Feishu answer/source records after each successful or partial result.")
     parser.add_argument("--mark-collected", action="store_true", help="With --writeback, set source Feishu rows 是否本次采集 to 否 after successful answer writeback.")
     parser.add_argument("--collect-account", help="Override the 采集账号 field written to Feishu answer rows.")
+    parser.add_argument("--capture-round", help="Override the 抓取轮次 field written to Feishu answer rows (default: NO.1).")
     parser.add_argument("--base-url", help="Feishu Base URL containing /base/{baseToken}?table=...&view=...")
     parser.add_argument("--base-token")
     parser.add_argument("--table-id")
@@ -132,6 +133,7 @@ def apply_feishu_config(args: argparse.Namespace, config: dict) -> None:
     args.source_table_id = args.source_table_id or _pick(writeback_cfg, "sourceTableId", "source_table_id", "aiSourceTableId", "ai_source_table_id")
     args.source_base_token = args.source_base_token or _pick(writeback_cfg, "baseToken", "base_token") or _pick(source_cfg, "baseToken", "base_token")
     args.collect_account = args.collect_account or _pick(config, "collectAccount", "collect_account")
+    args.capture_round = args.capture_round or _pick(config, "captureRound", "capture_round")
 
 
 def question_artifact_dir(output: str, session_name: str, index: int) -> str:
@@ -314,7 +316,7 @@ def run_question(
         extractor_enabled = bool(source_extractor_context and source_extractor_context.get("enabled"))
         if extractor_enabled and share_url:
             meta = (session_meta or {}) if session_meta else {}
-            natural_question = meta.get("linkedNaturalQuestion") or meta.get("naturalQuestion") or question
+            natural_question = meta.get("tanzhenCode") or meta.get("linkedNaturalQuestion") or meta.get("naturalQuestion") or question
             base_token = source_extractor_context.get("baseToken", "")
             table_id = source_extractor_context.get("tableId", "")
             extractor_options = source_extractor_context.get("options") or ExtractorOptions()
@@ -552,6 +554,8 @@ def main() -> None:
         task["output"] = args.output
     if args.collect_account:
         task.setdefault("options", {})["collectAccount"] = args.collect_account
+    if args.capture_round:
+        task.setdefault("options", {})["captureRound"] = args.capture_round
     if args.source_limit:
         task.setdefault("options", {})["sourceLimit"] = args.source_limit
     if args.link_only:
@@ -593,6 +597,7 @@ def main() -> None:
             "base": loaded["base"],
             "markCollected": args.mark_collected,
             "collectAccount": args.collect_account or task.get("options", {}).get("collectAccount"),
+            "captureRound": args.capture_round or task.get("options", {}).get("captureRound"),
             "larkCli": args.lark_cli,
             "dryRun": args.dry_run,
             "answerTableId": planned["answerTableId"],
@@ -610,6 +615,7 @@ def main() -> None:
             "base": {"baseToken": output_base_token, "tableId": answer_table_id},
             "markCollected": False,
             "collectAccount": args.collect_account or task.get("options", {}).get("collectAccount"),
+            "captureRound": args.capture_round or task.get("options", {}).get("captureRound"),
             "larkCli": args.lark_cli,
             "dryRun": args.dry_run,
             "answerTableId": answer_table_id,
@@ -631,6 +637,7 @@ def main() -> None:
             timeout_seconds=args.extractor_timeout or int(task_extractor_cfg.get("timeoutSeconds", 120)),
             max_retries=args.extractor_retries or int(task_extractor_cfg.get("maxRetries", 2)),
             retry_backoff_base=float(task_extractor_cfg.get("retryBackoffBase", 2.0)),
+            node_binary=task_extractor_cfg.get("nodeBinary", "node"),
         )
         source_extractor_context = {
             "enabled": True,

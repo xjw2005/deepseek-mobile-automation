@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -14,19 +15,21 @@ from .time_utils import now_iso, stamp
 FEISHU_WRITE_ATTEMPTS = 4
 
 
-FEISHU_ANSWER_TABLE_ID = "tblaV1deA4L9hzze"
-FEISHU_SOURCE_TABLE_ID = "tblz0H72enGdxc1l"
+FEISHU_ANSWER_TABLE_ID = "tblhzxIjigHfhlGd"
+FEISHU_SOURCE_TABLE_ID = "tblkdwFYfIo3Y2tG"
 DEFAULT_PLATFORM = "DeepSeek移动端"
 DEFAULT_COLLECT_ACCOUNT = "18870501682"
+DEFAULT_CAPTURE_ROUND = "NO.1"
+TANZHEN_CODE_FIELD = "探针单值编码"
 QUESTION_ID_FIELD = "问题ID"
 LEGACY_QUESTION_ID_FIELD = "关联自然问句"
 INPUT_QUESTION_ID_FIELDS = (QUESTION_ID_FIELD, LEGACY_QUESTION_ID_FIELD)
-QUESTION_TEXT_FIELDS = ("问题文本", "问题")
+QUESTION_TEXT_FIELDS = ("问题探针文本", "问题文本", "问题")
 THINKING_FIELD = "是否开启深度思考"
 COLLECT_NOW_FIELD = "是否本次采集"
 AI_PLATFORM_FIELD = "AI平台"
-ANSWER_WRITEBACK_FIELDS = ["采集账号", "问题文本", QUESTION_ID_FIELD, "是否开启深度思考", "AI回答", "深度思考", "是否触发联网", "对话链接", AI_PLATFORM_FIELD]
-SOURCE_WRITEBACK_FIELDS = ["来源标题", "来源URL", "引用来源类型", "引用来源平台", QUESTION_ID_FIELD]
+ANSWER_WRITEBACK_FIELDS = ["采集账号", "问题探针文本", TANZHEN_CODE_FIELD, "抓取轮次", "关键词", "AI回答", "是否触发联网", "分享对话链接", AI_PLATFORM_FIELD, "抓取日期"]
+SOURCE_WRITEBACK_FIELDS = ["来源标题", "来源URL", "来源类型", "引用来源平台", TANZHEN_CODE_FIELD, "来源摘取日期"]
 ANSWER_PRELUDE_PREFIXES = ("检索", "对比", "调研", "查询", "分析", "收集", "整合")
 ANSWER_START_MARKERS = (
     "适度水解奶粉主要",
@@ -82,6 +85,20 @@ def clean_answer_for_writeback(value) -> str:
         if starts:
             text = text[min(starts):]
     return clean_text(text)
+
+
+def capture_date_str() -> str:
+    """Return the Feishu writeback timestamp, precise to the minute."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def tanzhen_code_value(value) -> str:
+    """Normalize 探针单值编码 for text writeback."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, (int, float)):
+        return str(value)
+    return clean_text(value)
 
 
 def is_yes(value) -> bool:
@@ -182,7 +199,7 @@ def list_feishu_records_page(base: dict, offset: int, limit: int, lark_cli: str 
     ]
     if base.get("viewId"):
         args.extend(["--view-id", base["viewId"]])
-    for field_name in [*QUESTION_TEXT_FIELDS, *INPUT_QUESTION_ID_FIELDS, THINKING_FIELD, COLLECT_NOW_FIELD]:
+    for field_name in [*QUESTION_TEXT_FIELDS, *INPUT_QUESTION_ID_FIELDS, TANZHEN_CODE_FIELD, THINKING_FIELD, COLLECT_NOW_FIELD]:
         args.extend(["--field-id", field_name])
     args.extend([
         "--offset",
@@ -243,11 +260,13 @@ def build_task_from_feishu(args) -> dict:
         if row_map:
             question = first_row_value(row_map, QUESTION_TEXT_FIELDS)
             linked_natural_question = first_row_value(row_map, INPUT_QUESTION_ID_FIELDS)
+            tanzhen_code = row_map.get(TANZHEN_CODE_FIELD)
             thinking = row_map.get(THINKING_FIELD)
             collect_now = row_map.get(COLLECT_NOW_FIELD, "是")
         else:
             padded = [*row, None, None, None]
             question, linked_natural_question, thinking, collect_now = padded[:4]
+            tanzhen_code = None
             if collect_now is None:
                 collect_now = "是"
         record_id = record_ids[index] if index < len(record_ids) else None
@@ -276,6 +295,7 @@ def build_task_from_feishu(args) -> dict:
                 "viewId": base.get("viewId"),
                 "naturalQuestion": question_text,
                 "linkedNaturalQuestion": clean_text(linked_natural_question),
+                "tanzhenCode": tanzhen_code_value(tanzhen_code),
                 "fullQuestion": question_text,
                 "thinking": row_thinking,
                 "platform": platform,
@@ -357,7 +377,7 @@ def update_feishu_task_rows(base: dict, record_ids: list[str], lark_cli: str = "
     return run_json_command_with_payload(lark_cli, args, {"record_id_list": record_ids, "patch": {"是否本次采集": "否"}})
 
 
-def build_feishu_writeback_rows_for_result(source_session: dict, result: dict, collect_account: str | None = None) -> dict:
+def build_feishu_writeback_rows_for_result(source_session: dict, result: dict, collect_account: str | None = None, capture_round: str | None = None) -> dict:
     """Build Feishu answer rows for a completed question result."""
     answer_rows = []
     source_rows = []
@@ -370,27 +390,28 @@ def build_feishu_writeback_rows_for_result(source_session: dict, result: dict, c
     questions = source_session.get("questions") or []
     first_question = questions[0].get("text") if questions and isinstance(questions[0], dict) else (questions[0] if questions else "")
     natural_question = clean_text(meta.get("naturalQuestion")) or clean_text(first_question)
-    linked_natural_question = clean_text(meta.get("linkedNaturalQuestion"))
+    tanzhen_code = tanzhen_code_value(meta.get("tanzhenCode")) or clean_text(meta.get("linkedNaturalQuestion"))
     platform = normalize_ai_platform(meta.get("platform") or DEFAULT_PLATFORM)
     source_extraction = result.get("sourceExtraction") or {}
     network_triggered = int(source_extraction.get("sourceCount", 0) or 0) > 0 or bool(result.get("sources"))
     answer_rows.append([
         clean_text(collect_account or DEFAULT_COLLECT_ACCOUNT),
         natural_question,
-        linked_natural_question,
-        "是" if (source_session.get("thinking") or meta.get("thinking")) else "否",
-        cleaned_answer,
+        tanzhen_code,
+        clean_text(capture_round) or DEFAULT_CAPTURE_ROUND,
         clean_thinking_for_writeback(result.get("thinkingContent")),
+        cleaned_answer,
         "是" if network_triggered else "否",
         clean_text(result.get("answerShareUrl")),
         platform,
+        capture_date_str(),
     ])
     return {"answerRows": answer_rows, "sourceRows": source_rows}
 
 
 def write_feishu_result(writeback_context: dict, source_session: dict, result: dict) -> dict:
     """Write answer rows and summarize source extraction for auditing."""
-    rows = build_feishu_writeback_rows_for_result(source_session, result, writeback_context.get("collectAccount"))
+    rows = build_feishu_writeback_rows_for_result(source_session, result, writeback_context.get("collectAccount"), writeback_context.get("captureRound"))
     base = writeback_context["base"]
     lark_cli = writeback_context.get("larkCli", "lark-cli")
     dry_run = bool(writeback_context.get("dryRun"))
@@ -445,7 +466,15 @@ def write_feishu_result(writeback_context: dict, source_session: dict, result: d
         }
     source_record_id = (source_session.get("meta") or {}).get("feishuRecordId")
     if writeback_context.get("markCollected") and rows["answerRows"] and source_record_id:
-        source_update_result = update_feishu_task_rows(base, [source_record_id], lark_cli, dry_run)
+        try:
+            source_update_result = update_feishu_task_rows(base, [source_record_id], lark_cli, dry_run)
+        except FeishuError as exc:
+            source_update_result = {
+                "skipped": True,
+                "reason": "mark-collected-update-failed",
+                "error": str(exc),
+                "recordIds": [source_record_id],
+            }
     else:
         source_update_result = {"skipped": True, "reason": "no-source-record-id-or-answer-row" if writeback_context.get("markCollected") else "mark-collected-disabled"}
     return {

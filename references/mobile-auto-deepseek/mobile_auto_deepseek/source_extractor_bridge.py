@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -97,6 +99,33 @@ def resolve_script_path(explicit: str = "") -> Path:
     )
 
 
+def resolve_node_binary(value: str = "node") -> str:
+    """Resolve Node.js, including the bundled Codex runtime on Windows."""
+    requested = (value or "node").strip()
+    if requested != "node":
+        return requested
+    resolved = shutil.which(requested)
+    if resolved:
+        return resolved
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    bundled = home / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "node" / "bin" / "node.exe"
+    if bundled.exists():
+        return str(bundled)
+    return requested
+
+
+def node_subprocess_env() -> dict:
+    """Expose bundled Node modules such as playwright to the JS extractor."""
+    env = os.environ.copy()
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    bundled_modules = home / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "node" / "node_modules"
+    if bundled_modules.exists():
+        existing = env.get("NODE_PATH", "")
+        paths = [str(bundled_modules), *([existing] if existing else [])]
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
+
 def validate_params(share_url: str, natural_question: str) -> None:
     """Validate the share URL and question ID before extraction."""
     if not share_url or not share_url.strip():
@@ -122,7 +151,7 @@ def _build_command(
 ) -> list[str]:
     """Build the node command used to invoke the extractor."""
     cmd = [
-        options.node_binary,
+        resolve_node_binary(options.node_binary),
         str(script_path),
         "--url",
         share_url,
@@ -170,6 +199,7 @@ def _invoke_once(
             encoding="utf-8",
             errors="replace",
             timeout=options.timeout_seconds,
+            env=node_subprocess_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceExtractorError(
